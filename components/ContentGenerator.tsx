@@ -1,9 +1,11 @@
-import React, { useState } from 'react';
+
+import React, { useState, useEffect } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import ReactMarkdown from 'react-markdown';
-import { FileData, AnalysisResult, GeneratorType } from '../types';
-import { generateContent } from '../services/geminiService';
-import { Sparkles, Copy, Check, MessageSquare, FileText, Mail, Briefcase, FileDown, FileOutput, Printer, Settings, X, Download, AlertTriangle, Loader2, Share2, Link, ChevronDown } from 'lucide-react';
+import { FileData, AnalysisResult, GeneratorType, ContactProfile } from '../types';
+import { generateContent, calculateImprovedScore, refineContent } from '../services/geminiService';
+import { MessageSquare, FileText, Mail, FileDown, FileOutput, X, Loader2, Minimize2, Maximize2, UserCircle, Camera, Wand2, Moon, Sun, Send, Youtube, GraduationCap, TrendingUp, Download, Link, Check, Linkedin, Copy, Lock, Edit2, CheckCircle2 } from 'lucide-react';
+import PaymentLock from './PaymentLock';
 
 interface ContentGeneratorProps {
   resumeFile: FileData;
@@ -11,637 +13,755 @@ interface ContentGeneratorProps {
   analysis: AnalysisResult;
 }
 
-interface DocSettings {
-  headerText: string;
-  footerText: string;
-  showDate: boolean;
-}
+const ACCENT_COLORS = [
+    { name: 'Executive Orange', value: '#F97316' },
+    { name: 'Deep Blue', value: '#2563EB' },
+    { name: 'Emerald', value: '#059669' },
+    { name: 'Purple', value: '#7C3AED' },
+    { name: 'Slate', value: '#475569' },
+];
+
+const LANGUAGES = [
+    "English", "Spanish", "French", "German", "Hindi", "Mandarin", "Portuguese", "Arabic"
+];
+
+// --- CHAT SIDEBAR ---
+const ChatSidebar = ({ 
+    show, onClose, onRefine, onQuickAction, chatInput, setChatInput, isRefining, isLightMode 
+}: any) => {
+    if (!show) return null;
+    return (
+        <motion.div 
+            initial={{ width: 0, opacity: 0 }}
+            animate={{ width: 300, opacity: 1 }}
+            exit={{ width: 0, opacity: 0 }}
+            className={`border-l flex flex-col absolute md:relative right-0 top-0 bottom-0 z-40 w-full md:w-[300px] h-full shadow-2xl ${isLightMode ? 'bg-zinc-50 border-zinc-200' : 'bg-zinc-900 border-zinc-800'}`}
+        >
+            <div className="p-4 border-b border-zinc-800/50 flex justify-between items-center">
+                <span className={`text-xs font-bold uppercase tracking-wider ${isLightMode ? 'text-zinc-700' : 'text-zinc-400'}`}>AI Editor</span>
+                <button onClick={onClose}><X className="w-4 h-4 text-zinc-500" /></button>
+            </div>
+            
+            <div className="flex-1 p-4 overflow-y-auto">
+                <div className="grid grid-cols-2 gap-2 mb-6">
+                    <button onClick={() => onQuickAction('shorten')} disabled={isRefining} className="p-2 bg-zinc-800/50 hover:bg-zinc-800 border border-zinc-700 rounded text-xs text-zinc-300 flex flex-col items-center gap-1">
+                        <Minimize2 className="w-4 h-4" /> Shorten
+                    </button>
+                    <button onClick={() => onQuickAction('expand')} disabled={isRefining} className="p-2 bg-zinc-800/50 hover:bg-zinc-800 border border-zinc-700 rounded text-xs text-zinc-300 flex flex-col items-center gap-1">
+                        <Maximize2 className="w-4 h-4" /> Expand
+                    </button>
+                </div>
+            </div>
+
+            <div className="p-4 border-t border-zinc-800/50">
+                <div className="relative">
+                    <textarea 
+                        value={chatInput}
+                        onChange={(e: any) => setChatInput(e.target.value)}
+                        placeholder="E.g. 'Make the summary more punchy'..."
+                        className={`w-full rounded-lg text-sm p-3 pr-10 resize-none h-24 focus:outline-none focus:ring-1 focus:ring-orange-500 ${isLightMode ? 'bg-white border border-zinc-300 text-black' : 'bg-zinc-950 border border-zinc-800 text-white'}`}
+                        onKeyDown={(e: any) => { if(e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); onRefine(); }}}
+                    />
+                    <button 
+                        onClick={onRefine}
+                        disabled={isRefining || !chatInput.trim()}
+                        className="absolute bottom-3 right-3 p-1.5 bg-orange-600 rounded-md text-white hover:bg-orange-500 disabled:opacity-50"
+                    >
+                        {isRefining ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Send className="w-3.5 h-3.5" />}
+                    </button>
+                </div>
+            </div>
+        </motion.div>
+    );
+};
 
 const ContentGenerator: React.FC<ContentGeneratorProps> = ({ resumeFile, jobDescription, analysis }) => {
   const [activeTab, setActiveTab] = useState<GeneratorType>(GeneratorType.ATS_RESUME);
   const [generatedData, setGeneratedData] = useState<Record<string, string>>({});
-  const [loading, setLoading] = useState(false);
-  const [copied, setCopied] = useState(false);
-  const [shared, setShared] = useState(false);
+  const [loadingStates, setLoadingStates] = useState<Record<string, boolean>>({});
+  
+  const [isLightMode, setIsLightMode] = useState(false);
+  const [optimizedScore, setOptimizedScore] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [downloadError, setDownloadError] = useState<string | null>(null);
   
-  // Email Customization State
-  const [emailRecipient, setEmailRecipient] = useState("Recruiter");
+  // Profile Verification
+  const [isProfileVerified, setIsProfileVerified] = useState(false);
+  const [profileData, setProfileData] = useState<ContactProfile>(analysis.contactProfile);
+  const [profilePhoto, setProfilePhoto] = useState<string | null>(null);
+  const [showPhotoUpload, setShowPhotoUpload] = useState(false);
+  const [editingVerified, setEditingVerified] = useState(false);
+
+  // Settings
+  const [tailorExperience, setTailorExperience] = useState(false);
+  const [accentColor, setAccentColor] = useState(ACCENT_COLORS[0]);
+  const [selectedLanguage, setSelectedLanguage] = useState("English");
   
-  // Specific loading states
+  // Email/LinkedIn Settings
+  const [emailChannel, setEmailChannel] = useState<'Email' | 'LinkedIn'>('Email');
+  const [emailScenario, setEmailScenario] = useState('Follow-up');
+
+  // Chat / Refinement
+  const [showChat, setShowChat] = useState(false);
+  const [chatInput, setChatInput] = useState("");
+  const [isRefining, setIsRefining] = useState(false);
   const [isDownloading, setIsDownloading] = useState<string | null>(null);
 
-  // Settings State
-  const [showSettings, setShowSettings] = useState(false);
-  const [docSettings, setDocSettings] = useState<DocSettings>({
-    headerText: 'MonuisHere | Career Architect Report',
-    footerText: 'Generated by MonuisHere AI. Private & Confidential.',
-    showDate: true
-  });
+  // Sharing
+  const [showCopyToast, setShowCopyToast] = useState(false);
+
+  // Payment
+  const [isPaid, setIsPaid] = useState(false);
+  const [showPaymentLock, setShowPaymentLock] = useState(false);
+  
+  // Manual Edit Mode
+  const [isEditing, setIsEditing] = useState(false);
+
+  // EAGER LOADING
+  useEffect(() => {
+    if (isProfileVerified) {
+        generateAllContent();
+    }
+  }, [isProfileVerified, selectedLanguage]);
+
+  const generateAllContent = async () => {
+    await handleGenerate(GeneratorType.ATS_RESUME, true);
+    
+    const queue = [
+        { type: GeneratorType.COVER_LETTER, delay: 3000 },
+        { type: GeneratorType.INTERVIEW_PREP, delay: 6000 },
+        { type: GeneratorType.LEARNING_PATH, delay: 9000 },
+        { type: GeneratorType.EMAIL_TEMPLATE, delay: 12000 },
+        { type: GeneratorType.MARKET_INSIGHTS, delay: 15000 }
+    ];
+
+    queue.forEach(item => {
+        setTimeout(() => {
+             if (!generatedData[item.type]) handleGenerate(item.type, true);
+        }, item.delay);
+    });
+  };
+
+  const handlePhotoUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (file) {
+      const reader = new FileReader();
+      reader.onloadend = () => setProfilePhoto(reader.result as string);
+      reader.readAsDataURL(file);
+    }
+  };
 
   const handleGenerate = async (type: GeneratorType, forceRefresh = false) => {
-    if (generatedData[type] && !forceRefresh) return; 
+    if (generatedData[type] && !forceRefresh) return;
 
-    setLoading(true);
+    setLoadingStates(prev => ({ ...prev, [type]: true }));
     setError(null);
-    setDownloadError(null);
+
     try {
-      const content = await generateContent(
-          type, 
-          resumeFile, 
-          jobDescription, 
-          analysis,
-          { emailRecipient: type === GeneratorType.EMAIL_TEMPLATE ? emailRecipient : undefined }
-      );
-      setGeneratedData(prev => ({ ...prev, [type]: content }));
+        const content = await generateContent(
+            type, 
+            resumeFile, 
+            jobDescription, 
+            analysis,
+            { 
+                verifiedProfile: profileData,
+                tailorExperience: tailorExperience && type === GeneratorType.ATS_RESUME,
+                language: selectedLanguage,
+                emailChannel: emailChannel,
+                emailScenario: emailScenario
+            }
+        );
+        setGeneratedData(prev => ({ ...prev, [type]: content }));
+
+        if (type === GeneratorType.ATS_RESUME) {
+            calculateImprovedScore(content, jobDescription).then(score => setOptimizedScore(score));
+        }
     } catch (err: any) {
-      setError(err.message || "Failed to generate content. Please try again.");
+        if (activeTab === type) setError(err.message || "Generation failed.");
     } finally {
-      setLoading(false);
+        setLoadingStates(prev => ({ ...prev, [type]: false }));
     }
   };
 
-  React.useEffect(() => {
-    if (!generatedData[activeTab] && !loading) {
-      handleGenerate(activeTab);
-    }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeTab]);
-
-  const copyToClipboard = () => {
-    const text = generatedData[activeTab];
-    if (text) {
-      navigator.clipboard.writeText(text);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 2000);
-    }
+  const handleRefine = async () => {
+      if (!chatInput.trim() || !generatedData[activeTab]) return;
+      setIsRefining(true);
+      try {
+          const newContent = await refineContent(
+              generatedData[activeTab], 
+              chatInput, 
+              activeTab === GeneratorType.ATS_RESUME ? jobDescription : "Professional Context"
+          );
+          setGeneratedData(prev => ({ ...prev, [activeTab]: newContent }));
+          setChatInput("");
+      } catch (e) {
+          setError("Failed to refine content.");
+      } finally {
+          setIsRefining(false);
+      }
   };
 
-  const handleShare = () => {
-    const mockLink = `https://monuishere.ai/s/${Math.random().toString(36).substr(2, 8)}`;
-    navigator.clipboard.writeText(mockLink);
-    setShared(true);
-    setTimeout(() => setShared(false), 3000);
+  const handleQuickAction = async (action: 'shorten' | 'expand') => {
+      const prompt = action === 'shorten' 
+        ? "Shorten this content by 20% while keeping key metrics." 
+        : "Expand on the key points with more professional detail.";
+      setChatInput(prompt);
+      setIsRefining(true);
+      try {
+          const newContent = await refineContent(
+              generatedData[activeTab], 
+              prompt, 
+              activeTab === GeneratorType.ATS_RESUME ? jobDescription : "Context"
+          );
+          setGeneratedData(prev => ({ ...prev, [activeTab]: newContent }));
+          setChatInput("");
+      } finally {
+          setIsRefining(false);
+      }
+  };
+  
+  const handleCopyText = () => {
+      const content = generatedData[activeTab];
+      if (content) {
+          navigator.clipboard.writeText(content);
+          setShowCopyToast(true);
+          setTimeout(() => setShowCopyToast(false), 3000);
+      }
   };
 
-  const cleanFilename = (type: string, ext: string) => {
-    return `MonuisHere_${type.replace(/[\s/]/g, '_')}_${new Date().toISOString().slice(0,10)}.${ext}`;
-  };
+  const handleDownloadClick = () => {
+      if (isPaid) {
+          handleDownloadPDF();
+      } else {
+          setShowPaymentLock(true);
+      }
+  }
 
   const handleDownloadPDF = async () => {
-    setDownloadError(null);
     const content = generatedData[activeTab];
-    if (!content) {
-        setDownloadError("Content not ready for download.");
-        return;
-    }
+    if (!content) return;
 
     setIsDownloading('pdf');
-    
-    await new Promise(resolve => setTimeout(resolve, 500));
+    await new Promise(resolve => setTimeout(resolve, 500)); 
 
     try {
         const container = document.createElement('div');
-        container.style.position = 'absolute';
-        container.style.left = '-9999px';
-        container.style.top = '0';
-        container.style.width = '800px'; 
-        container.style.padding = '40px';
-        container.style.color = '#000';
-        container.style.background = '#fff';
-        container.style.fontFamily = 'Inter, sans-serif';
+        // STRICT HARVARD STYLE
+        container.style.width = '8.5in'; 
+        container.style.padding = '0.5in 0.75in';
+        container.style.color = '#000000'; 
+        container.style.background = '#ffffff'; 
+        container.style.fontFamily = '"Times New Roman", Times, serif';
+        container.style.fontSize = '10pt';
+        container.style.lineHeight = '1.25';
         
-        // Header
-        const header = document.createElement('div');
-        header.style.borderBottom = '2px solid #F97316';
-        header.style.paddingBottom = '10px';
-        header.style.marginBottom = '20px';
-        header.style.display = 'flex';
-        header.style.justifyContent = 'space-between';
-        header.style.alignItems = 'center';
-        header.innerHTML = `
-        <div>
-            <h1 style="font-size: 16px; font-weight: bold; margin: 0; color: #18181B;">${docSettings.headerText}</h1>
-            <p style="font-size: 10px; color: #71717A; margin: 0;">${activeTab}</p>
-        </div>
-        <div style="text-align: right;">
-            ${docSettings.showDate ? `<p style="font-size: 10px; color: #71717A; margin: 0;">${new Date().toLocaleDateString()}</p>` : ''}
-            <p style="font-size: 10px; color: #F97316; margin: 0; font-weight: bold;">Verified Output</p>
-        </div>
-        `;
-        
-        const body = document.createElement('div');
-        body.className = 'markdown-body';
-        
-        const sourceElement = document.getElementById('generated-content');
-        if (sourceElement) {
-            body.innerHTML = sourceElement.innerHTML;
-            const allElements = body.querySelectorAll('*');
-            allElements.forEach(el => {
-                if (el instanceof HTMLElement) {
-                    el.style.color = '#18181b'; 
-                    el.style.backgroundColor = 'transparent';
-                    if (el.tagName === 'H1') {
-                        el.style.fontSize = '24px';
-                        el.style.borderBottom = '1px solid #e4e4e7';
-                        el.style.marginBottom = '12px';
-                    }
-                    if (el.tagName === 'H2') {
-                        el.style.color = '#ea580c';
-                        el.style.fontSize = '18px';
-                        el.style.marginTop = '20px';
-                        el.style.marginBottom = '10px';
-                    }
-                    if (el.tagName === 'H3') {
-                        el.style.fontSize = '14px';
-                        el.style.fontWeight = 'bold';
-                        el.style.marginTop = '16px';
-                    }
-                    if (el.tagName === 'P') {
-                        el.style.fontSize = '11px';
-                        el.style.lineHeight = '1.6';
-                        el.style.marginBottom = '10px';
-                    }
-                    if (el.tagName === 'LI') {
-                        el.style.fontSize = '11px';
-                        el.style.marginBottom = '4px';
-                    }
-                    if (el.tagName === 'CODE') {
-                        el.style.backgroundColor = '#f4f4f5';
-                        el.style.border = '1px solid #e4e4e7';
-                        el.style.padding = '2px 4px';
-                        el.style.borderRadius = '4px';
-                        el.style.fontFamily = 'monospace';
-                        el.style.fontSize = '10px';
-                    }
-                    if (el.tagName === 'BLOCKQUOTE') {
-                        el.style.borderLeft = '3px solid #ea580c';
-                        el.style.paddingLeft = '10px';
-                        el.style.color = '#52525b';
-                        el.style.fontStyle = 'italic';
-                    }
-                }
-            });
-        } else {
-            body.innerText = content;
-        }
+        let htmlContent = content
+            // H1 Name
+            .replace(/^# (.*$)/gim, `<div style="text-align: center; margin-bottom: 5px;"><h1 style="font-size: 16pt; font-weight: bold; text-transform: uppercase; margin: 0; padding: 0;">$1</h1></div>`)
+            // H2 Section Headers
+            .replace(/^## (.*$)/gim, `<h2 style="font-size: 11pt; font-weight: bold; text-transform: uppercase; border-bottom: 1px solid #000; margin-top: 15px; margin-bottom: 6px; padding-bottom: 2px;">$1</h2>`)
+            // H3 Role/Company
+            .replace(/^### (.*$)/gim, `<h3 style="font-size: 10.5pt; font-weight: bold; margin-top: 8px; margin-bottom: 2px;">$1</h3>`)
+            // Bold
+            .replace(/\*\*(.*)\*\*/gim, '<strong>$1</strong>')
+            // Bullets
+            .replace(/^\s*-\s(.*$)/gim, `<li style="margin-bottom: 2px; margin-left: 20px;">$1</li>`)
+            // Convert LinkedIn links in text to anchors
+            .replace(/(linkedin\.com\/in\/[a-zA-Z0-9_-]+)/gi, '<a href="https://$1" style="color: black; text-decoration: none;">$1</a>')
+            // Newlines
+            .replace(/\n\n/gim, '<br/>');
 
-        const footer = document.createElement('div');
-        footer.style.borderTop = '1px solid #E4E4E7';
-        footer.style.marginTop = '30px';
-        footer.style.paddingTop = '10px';
-        footer.style.textAlign = 'center';
-        footer.innerHTML = `
-        <p style="font-size: 9px; color: #A1A1AA; margin: 0;">${docSettings.footerText}</p>
-        `;
-
-        container.appendChild(header);
-        container.appendChild(body);
-        container.appendChild(footer);
+        container.innerHTML = htmlContent;
         document.body.appendChild(container);
 
         const opt = {
-        margin: 0.5,
-        filename: cleanFilename(activeTab, 'pdf'),
-        image: { type: 'jpeg', quality: 0.98 },
-        html2canvas: { scale: 2, useCORS: true },
-        jsPDF: { unit: 'in', format: 'letter', orientation: 'portrait' }
+            margin: 0, 
+            filename: `Optimized_${activeTab.replace(/\s/g, '_')}.pdf`,
+            image: { type: 'jpeg', quality: 0.98 },
+            html2canvas: { scale: 2, useCORS: true },
+            jsPDF: { unit: 'in', format: 'letter', orientation: 'portrait' }
         };
         
-        await (window as any).html2pdf().set(opt).from(container).save();
+        // @ts-ignore
+        await window.html2pdf().set(opt).from(container).save();
         document.body.removeChild(container);
     } catch (e) {
-        console.error(e);
-        setDownloadError("PDF Download Failed. Please check your browser permissions.");
+        setError("PDF Download Failed.");
     } finally {
         setIsDownloading(null);
     }
   };
-
-  const handleDownloadODT = async () => {
-    setDownloadError(null);
-    const text = generatedData[activeTab];
-    if (!text) {
-         setDownloadError("Content not generated yet.");
-         return;
-    }
-    
-    setIsDownloading('odt');
-    await new Promise(resolve => setTimeout(resolve, 300));
-
-    try {
-        const escapeXml = (unsafe: string) => unsafe.replace(/[<>&'"]/g, (c) => {
-            switch (c) {
-                case '<': return '&lt;';
-                case '>': return '&gt;';
-                case '&': return '&amp;';
-                case '\'': return '&apos;';
-                case '"': return '&quot;';
-                default: return c;
-            }
-        });
-
-        const lines = text.split('\n');
-        let xmlBody = '';
-        let listOpen = false;
-
-        lines.forEach(line => {
-            const trimmed = line.trim();
-            if (trimmed === '') {
-                if (listOpen) {
-                    xmlBody += `</text:list>`;
-                    listOpen = false;
-                }
-                return;
-            }
-
-            if (trimmed.startsWith('# ')) {
-                xmlBody += `<text:h text:style-name="Heading_20_1" text:outline-level="1">${escapeXml(trimmed.substring(2))}</text:h>`;
-            } else if (trimmed.startsWith('## ')) {
-                xmlBody += `<text:h text:style-name="Heading_20_2" text:outline-level="2">${escapeXml(trimmed.substring(3))}</text:h>`;
-            } else if (trimmed.startsWith('### ')) {
-                xmlBody += `<text:h text:style-name="Heading_20_3" text:outline-level="3">${escapeXml(trimmed.substring(4))}</text:h>`;
-            } 
-            else if (trimmed.startsWith('- ') || trimmed.startsWith('* ')) {
-                if (!listOpen) {
-                    xmlBody += `<text:list text:style-name="List_20_1">`;
-                    listOpen = true;
-                }
-                let content = trimmed.substring(2);
-                content = content.replace(/\*\*(.*?)\*\*/g, '<text:span text:style-name="Bold">$1</text:span>');
-                xmlBody += `<text:list-item><text:p>${content}</text:p></text:list-item>`;
-            } 
-            else {
-                if (listOpen) {
-                    xmlBody += `</text:list>`;
-                    listOpen = false;
-                }
-                let content = escapeXml(trimmed);
-                content = content.replace(/\*\*(.*?)\*\*/g, '<text:span text:style-name="Bold">$1</text:span>');
-                content = content.replace(/\*(.*?)\*/g, '<text:span text:style-name="Italic">$1</text:span>');
-                
-                xmlBody += `<text:p text:style-name="Standard">${content}</text:p>`;
-            }
-        });
-
-        if (listOpen) {
-            xmlBody += `</text:list>`;
-        }
-
-        const fodtTemplate = `<?xml version="1.0" encoding="UTF-8"?>
-    <office:document xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" 
-    xmlns:style="urn:oasis:names:tc:opendocument:xmlns:style:1.0" 
-    xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0" 
-    xmlns:fo="urn:oasis:names:tc:opendocument:xmlns:xsl-fo-compatible:1.0" 
-    office:version="1.2" office:mimetype="application/vnd.oasis.opendocument.text">
-    <office:automatic-styles>
-    <style:style style:name="Bold" style:family="text"><style:text-properties fo:font-weight="bold"/></style:style>
-    <style:style style:name="Italic" style:family="text"><style:text-properties fo:font-style="italic"/></style:style>
-    <style:style style:name="Heading_20_1" style:display-name="Heading 1" style:family="paragraph" style:parent-style-name="Standard" style:next-style-name="Standard">
-        <style:text-properties fo:font-size="18pt" fo:font-weight="bold" fo:color="#ea580c"/>
-    </style:style>
-    <style:style style:name="Heading_20_2" style:display-name="Heading 2" style:family="paragraph" style:parent-style-name="Standard" style:next-style-name="Standard">
-        <style:text-properties fo:font-size="14pt" fo:font-weight="bold" fo:color="#18181b"/>
-    </style:style>
-    </office:automatic-styles>
-    <office:body>
-    <office:text>
-    <text:p text:style-name="Standard" fo:font-weight="bold" fo:font-size="10pt" fo:color="#555555">${escapeXml(docSettings.headerText)}</text:p>
-    <text:p text:style-name="Standard" fo:font-size="8pt" fo:color="#999999">${docSettings.showDate ? new Date().toLocaleDateString() : ''}</text:p>
-    <text:p text:style-name="Standard"> </text:p>
-    ${xmlBody}
-    <text:p text:style-name="Standard"> </text:p>
-    <text:p text:style-name="Standard" fo:font-size="8pt" fo:color="#999999" fo:text-align="center">${escapeXml(docSettings.footerText)}</text:p>
-    </office:text>
-    </office:body>
-    </office:document>`;
-
-        const element = document.createElement("a");
-        const file = new Blob([fodtTemplate], {type: 'application/vnd.oasis.opendocument.text'});
-        element.href = URL.createObjectURL(file);
-        element.download = cleanFilename(activeTab, 'fodt'); 
-        document.body.appendChild(element); 
-        element.click();
-        document.body.removeChild(element);
-    } catch (e) {
-        setDownloadError("ODT/Word Export Failed.");
-    } finally {
-        setIsDownloading(null);
-    }
-  };
-
-  const handleDownloadCSV = async () => {
-    setDownloadError(null);
-    const text = generatedData[activeTab];
-    if (!text) {
-        setDownloadError("Content empty.");
-        return;
-    }
-
-    setIsDownloading('csv');
-    await new Promise(resolve => setTimeout(resolve, 300));
-
-    try {
-        const rows = [
-            ["Document Type", activeTab],
-            ["Generated Date", new Date().toISOString()],
-            ["Application Name", "MonuisHere AI"],
-            ["Content", text]
-        ];
-
-        const csvContent = rows.map(e => e.map(c => `"${c.replace(/"/g, '""')}"`).join(",")).join("\n");
-        const element = document.createElement("a");
-        const file = new Blob([csvContent], {type: 'text/csv'});
-        element.href = URL.createObjectURL(file);
-        element.download = cleanFilename(activeTab, 'csv');
-        document.body.appendChild(element); 
-        element.click();
-        document.body.removeChild(element);
-    } catch (e) {
-        setDownloadError("CSV Export Failed. Try checking your browser's download settings.");
-    } finally {
-        setIsDownloading(null);
-    }
+  
+  const handleDownloadTXT = () => {
+      const content = generatedData[activeTab];
+      if (!content) return;
+      const element = document.createElement("a");
+      const file = new Blob([content], {type: 'text/plain'});
+      element.href = URL.createObjectURL(file);
+      element.download = `Optimized_${activeTab.replace(/\s/g, '_')}.txt`;
+      document.body.appendChild(element);
+      element.click();
+      document.body.removeChild(element);
   };
 
   const tabs = [
     { id: GeneratorType.ATS_RESUME, icon: FileOutput, label: 'Full ATS Resume' },
-    { id: GeneratorType.RESUME_SUGGESTIONS, icon: Briefcase, label: 'Optimization' },
+    { id: GeneratorType.LEARNING_PATH, icon: GraduationCap, label: 'Skill Gap & Learning' },
     { id: GeneratorType.COVER_LETTER, icon: FileText, label: 'Cover Letter' },
     { id: GeneratorType.INTERVIEW_PREP, icon: MessageSquare, label: 'Interview' },
-    { id: GeneratorType.EMAIL_TEMPLATE, icon: Mail, label: 'Email' },
+    { id: GeneratorType.EMAIL_TEMPLATE, icon: Mail, label: 'Outreach' },
+    { id: GeneratorType.MARKET_INSIGHTS, icon: TrendingUp, label: 'Market Insights' },
   ];
 
-  return (
-    <div className="flex flex-col h-full bg-zinc-950 relative">
-      
-      {/* Settings Modal */}
-      <AnimatePresence>
-        {showSettings && (
-            <motion.div 
-                initial={{ opacity: 0, y: -10, scale: 0.95 }}
-                animate={{ opacity: 1, y: 0, scale: 1 }}
-                exit={{ opacity: 0, y: -10, scale: 0.95 }}
-                className="absolute top-14 right-4 z-30 w-72 bg-zinc-900 border border-zinc-700 rounded-xl shadow-2xl p-4"
-            >
-                <div className="flex justify-between items-center mb-4 pb-2 border-b border-zinc-800">
-                    <h3 className="text-sm font-bold text-white flex items-center gap-2">
-                        <Settings className="w-3 h-3" />
-                        Document Settings
-                    </h3>
-                    <button onClick={() => setShowSettings(false)} className="text-zinc-500 hover:text-white"><X className="w-4 h-4" /></button>
-                </div>
-                <div className="space-y-4">
-                    <div>
-                        <label className="text-[10px] uppercase text-zinc-500 font-mono block mb-1">Header Title</label>
-                        <input 
-                            type="text" 
-                            value={docSettings.headerText}
-                            onChange={(e) => setDocSettings(s => ({...s, headerText: e.target.value}))}
-                            className="w-full bg-zinc-950 border border-zinc-800 rounded px-2 py-1.5 text-xs text-white focus:border-orange-500 outline-none transition-colors"
-                        />
-                    </div>
-                    <div>
-                        <label className="text-[10px] uppercase text-zinc-500 font-mono block mb-1">Footer Text</label>
-                        <input 
-                            type="text" 
-                            value={docSettings.footerText}
-                            onChange={(e) => setDocSettings(s => ({...s, footerText: e.target.value}))}
-                            className="w-full bg-zinc-950 border border-zinc-800 rounded px-2 py-1.5 text-xs text-white focus:border-orange-500 outline-none transition-colors"
-                        />
-                    </div>
-                    <div className="flex items-center gap-2 pt-2 border-t border-zinc-800/50">
-                         <input 
-                            type="checkbox"
-                            checked={docSettings.showDate}
-                            onChange={(e) => setDocSettings(s => ({...s, showDate: e.target.checked}))} 
-                            id="showDate"
-                            className="accent-orange-500 w-3 h-3"
-                        />
-                        <label htmlFor="showDate" className="text-xs text-zinc-400 cursor-pointer select-none">Include Date in Header</label>
-                    </div>
-                </div>
-            </motion.div>
-        )}
-      </AnimatePresence>
+  const handleYoutubeSearch = (query: string) => {
+    const cleanQuery = query.replace(/['"]+/g, '').replace('Youtube:', '').trim();
+    window.open(`https://www.youtube.com/results?search_query=${encodeURIComponent(cleanQuery)}`, '_blank');
+  };
 
-      {/* 1. Header & Toolbar */}
-      <div className="flex flex-col border-b border-zinc-800 bg-zinc-900/30 backdrop-blur-sm shrink-0">
+  const renderContent = () => {
+    const isResume = activeTab === GeneratorType.ATS_RESUME;
+    const h1Color = isLightMode ? 'text-zinc-900' : 'text-white';
+    const textColor = isLightMode ? 'text-zinc-800' : 'text-zinc-300';
+    const borderColor = isLightMode ? 'border-zinc-200' : 'border-zinc-800';
+
+    if (activeTab === GeneratorType.MARKET_INSIGHTS) {
+        let json;
+        try {
+            json = JSON.parse(generatedData[activeTab]);
+        } catch (e) {
+            // Fallback to text if parsing fails
+        }
+
+        if (json) {
+            const cardBg = isLightMode ? 'bg-zinc-50 border-zinc-200' : 'bg-zinc-900/50 border-white/10';
+            const cardTitle = 'text-zinc-500 text-xs font-bold uppercase mb-2';
+            const cardValue = isLightMode ? 'text-zinc-900' : 'text-white';
+            const cardText = isLightMode ? 'text-zinc-700' : 'text-zinc-300';
+            
+            return (
+                <div className="space-y-6">
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                        <div className={`${cardBg} p-6 rounded-xl border`}>
+                            <h3 className={cardTitle}>Verdict</h3>
+                            <p className={`${cardValue} text-lg font-bold`}>{json.verdict || "N/A"}</p>
+                        </div>
+                        <div className={`${cardBg} p-6 rounded-xl border`}>
+                            <h3 className={cardTitle}>Salary Range</h3>
+                            <p className="text-green-500 text-lg font-bold">{json.salary_range || "N/A"}</p>
+                        </div>
+                    </div>
+                    <div className={`${cardBg} p-6 rounded-xl border`}>
+                        <h3 className={cardTitle}>Culture & WFH</h3>
+                        <p className={`${cardText} text-sm leading-relaxed`}>{json.culture_wfh}</p>
+                    </div>
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                         <div className={`${cardBg} p-6 rounded-xl border`}>
+                            <h3 className={cardTitle}>Pros</h3>
+                            <ul className="space-y-2">
+                                {json.pros?.map((p: string, i: number) => <li key={i} className={`text-xs flex items-start gap-2 ${cardText}`}><Check className="w-3 h-3 text-green-500 mt-0.5" /> {p}</li>)}
+                            </ul>
+                        </div>
+                        <div className={`${cardBg} p-6 rounded-xl border`}>
+                            <h3 className={cardTitle}>Cons</h3>
+                            <ul className="space-y-2">
+                                {json.cons?.map((p: string, i: number) => <li key={i} className={`text-xs flex items-start gap-2 ${cardText}`}><X className="w-3 h-3 text-red-500 mt-0.5" /> {p}</li>)}
+                            </ul>
+                        </div>
+                    </div>
+                </div>
+            );
+        }
+    }
+
+    if (isEditing) {
+        return (
+            <textarea
+                value={generatedData[activeTab]}
+                onChange={(e) => setGeneratedData(prev => ({ ...prev, [activeTab]: e.target.value }))}
+                className={`w-full h-[600px] p-4 font-mono text-sm resize-none focus:outline-none ${isLightMode ? 'bg-white text-zinc-900 border border-zinc-200 rounded' : 'bg-zinc-950 text-zinc-300'}`}
+            />
+        );
+    }
+
+    const content = (
+        <ReactMarkdown
+            components={{
+                h1: ({node, ...props}) => (
+                    <h1 className={`text-2xl sm:text-4xl font-bold mb-2 text-center uppercase tracking-wide border-b ${borderColor} pb-4 ${h1Color}`} {...props} />
+                ),
+                h2: ({node, ...props}) => (
+                    <h2 
+                        className={`text-lg sm:text-xl font-bold mt-8 mb-4 uppercase tracking-widest border-b ${borderColor} pb-2 flex items-center gap-2`} 
+                        style={{ color: accentColor.value }}
+                        {...props} 
+                    />
+                ),
+                h3: ({node, ...props}) => <h3 className={`text-base sm:text-lg font-bold mt-6 mb-2 ${isLightMode ? 'text-zinc-800' : 'text-zinc-100'}`} {...props} />,
+                ul: ({node, ...props}) => <ul className="space-y-2 my-4 pl-0" {...props} />,
+                li: ({node, ...props}) => (
+                    <li className={`flex items-start gap-3 text-sm sm:text-base leading-relaxed group ${textColor}`}>
+                        <span className="mt-2 w-1.5 h-1.5 rounded-full shrink-0 group-hover:scale-125 transition-all" style={{ backgroundColor: accentColor.value }} />
+                        <span className="flex-1">{props.children}</span>
+                    </li>
+                ),
+                p: ({node, ...props}) => {
+                    const text = String(props.children);
+                    if (text.includes("Youtube:")) {
+                        return (
+                            <button 
+                                onClick={() => handleYoutubeSearch(text)}
+                                className="inline-flex items-center gap-2 px-3 py-1.5 bg-red-600 hover:bg-red-700 text-white text-xs font-bold rounded-full my-2 transition-all shadow-md hover:shadow-lg"
+                            >
+                                <Youtube className="w-3.5 h-3.5" /> Watch Tutorial
+                            </button>
+                        );
+                    }
+                    return <p className={`mb-4 whitespace-pre-wrap break-words text-sm sm:text-base leading-relaxed ${textColor}`} {...props} />;
+                },
+                a: ({node, ...props}) => (
+                    <a className="text-orange-500 hover:underline font-bold" target="_blank" rel="noopener noreferrer" {...props} />
+                ),
+                strong: ({node, ...props}) => <strong className={`font-bold ${isLightMode ? 'text-black' : 'text-white'}`} {...props} />,
+                blockquote: ({node, ...props}) => (
+                     <blockquote className={`border-l-4 border-orange-500 pl-4 my-4 italic ${isLightMode ? 'bg-zinc-50 text-zinc-700' : 'bg-zinc-900/50 text-zinc-400'} p-3 rounded-r-lg`} {...props} />
+                )
+            }}
+        >
+            {generatedData[activeTab]}
+        </ReactMarkdown>
+    );
+
+    if (isResume && profilePhoto) {
+        return (
+            <div>
+                <div className="flex justify-center mb-6">
+                    <div className="p-1 rounded-full shadow-lg" style={{ backgroundColor: accentColor.value }}>
+                        <img src={profilePhoto} alt="Profile" className={`w-24 h-24 rounded-full object-cover border-4 ${isLightMode ? 'border-white' : 'border-zinc-900'}`} />
+                    </div>
+                </div>
+                {content}
+            </div>
+        );
+    }
+    return content;
+  };
+
+  if (!isProfileVerified) {
+     const fields = [
+         { key: 'name', label: 'Full Name', type: 'text', placeholder: 'Your Name' },
+         { key: 'email', label: 'Email', type: 'email', placeholder: 'email@address.com' },
+         { key: 'phone', label: 'Phone', type: 'tel', placeholder: '+1 234 567 890' },
+         { key: 'linkedin', label: 'LinkedIn URL', type: 'text', placeholder: 'linkedin.com/in/you' },
+     ];
+
+     return (
+        <div className="h-full overflow-y-auto custom-scrollbar p-4 md:p-8">
+            <motion.div 
+                initial={{ opacity: 0, y: 20 }}
+                animate={{ opacity: 1, y: 0 }}
+                className="max-w-xl mx-auto bg-zinc-900 border border-zinc-800 rounded-2xl p-6 sm:p-8 relative overflow-hidden shadow-2xl"
+            >
+                <div className="absolute top-0 inset-x-0 h-1 bg-gradient-to-r from-orange-500 to-purple-500"></div>
+                <div className="flex justify-center mb-4">
+                     <div className="bg-zinc-800 p-3 rounded-full">
+                        <UserCircle className="w-8 h-8 text-orange-500" />
+                     </div>
+                </div>
+                <h2 className="text-2xl font-bold text-white mb-2 text-center">
+                    Verify Your Profile
+                </h2>
+                <p className="text-zinc-500 text-sm text-center mb-8">
+                    Review extracted details and fill in missing information.
+                </p>
+                
+                <div className="flex flex-col items-center mb-8">
+                    <div className="relative group cursor-pointer" onClick={() => setShowPhotoUpload(true)}>
+                        <div className={`w-20 h-20 rounded-full flex items-center justify-center overflow-hidden border-2 transition-colors duration-500 bg-zinc-950`} style={{ borderColor: accentColor.value }}>
+                            {profilePhoto ? (
+                                <img src={profilePhoto} alt="Preview" className="w-full h-full object-cover" />
+                            ) : (
+                                <Camera className="w-8 h-8 text-zinc-500 group-hover:text-white transition-colors" />
+                            )}
+                        </div>
+                        <p className="mt-2 text-[10px] text-zinc-500 uppercase tracking-widest bg-zinc-900/50 px-2 rounded">(Optional)</p>
+                        <input type="file" accept="image/*" onChange={handlePhotoUpload} className="absolute inset-0 opacity-0 cursor-pointer" />
+                    </div>
+                </div>
+                
+                <div className="space-y-4 mb-8">
+                     {/* Missing Fields - Always Input */}
+                     {fields.filter(f => !analysis.contactProfile[f.key as keyof ContactProfile]).map(field => (
+                        <div key={field.key}>
+                            <label className="block text-xs font-bold text-zinc-500 uppercase mb-1">{field.label}</label>
+                            <input 
+                                type={field.type} 
+                                placeholder={field.placeholder} 
+                                value={(profileData as any)[field.key]} 
+                                onChange={e => setProfileData({...profileData, [field.key]: e.target.value})} 
+                                className="w-full bg-zinc-950 border border-zinc-700 rounded-lg px-4 py-3 text-white text-sm focus:border-orange-500 outline-none transition-colors" 
+                            />
+                        </div>
+                     ))}
+
+                     {/* Found Fields - Read Only unless editing */}
+                     {fields.filter(f => !!analysis.contactProfile[f.key as keyof ContactProfile]).length > 0 && (
+                        <div className="bg-zinc-950/50 rounded-xl border border-zinc-800 p-4">
+                            <div className="flex justify-between items-center mb-3">
+                                <span className="text-xs font-bold text-green-500 uppercase flex items-center gap-2">
+                                    <CheckCircle2 className="w-3.5 h-3.5" /> Verified Information
+                                </span>
+                                <button 
+                                    onClick={() => setEditingVerified(!editingVerified)}
+                                    className="text-[10px] text-zinc-500 hover:text-white underline flex items-center gap-1"
+                                >
+                                    <Edit2 className="w-3 h-3" />
+                                    {editingVerified ? 'Done' : 'Edit'}
+                                </button>
+                            </div>
+                            
+                            <div className="space-y-3">
+                                {fields.filter(f => !!analysis.contactProfile[f.key as keyof ContactProfile]).map(field => (
+                                    <div key={field.key}>
+                                        {editingVerified ? (
+                                            <div>
+                                                 <label className="block text-[10px] font-bold text-zinc-600 uppercase mb-1">{field.label}</label>
+                                                 <input 
+                                                    type={field.type} 
+                                                    value={(profileData as any)[field.key]} 
+                                                    onChange={e => setProfileData({...profileData, [field.key]: e.target.value})} 
+                                                    className="w-full bg-zinc-900 border border-zinc-700 rounded px-3 py-2 text-white text-xs focus:border-orange-500 outline-none" 
+                                                />
+                                            </div>
+                                        ) : (
+                                            <div className="flex justify-between items-center text-sm">
+                                                <span className="text-zinc-500 text-xs uppercase w-24 shrink-0">{field.label}</span>
+                                                <span className="text-zinc-200 font-medium truncate text-right flex-1">{(profileData as any)[field.key]}</span>
+                                            </div>
+                                        )}
+                                    </div>
+                                ))}
+                            </div>
+                        </div>
+                     )}
+                </div>
+
+                <button onClick={() => setIsProfileVerified(true)} className="w-full bg-orange-600 hover:bg-orange-500 text-white font-bold py-3.5 px-8 rounded-lg transition-all shadow-lg text-sm tracking-wide">
+                    Confirm & Unlock Editor
+                </button>
+            </motion.div>
+        </div>
+     );
+  }
+
+  return (
+    <div className={`flex flex-col h-full relative transition-colors duration-500 ${isLightMode ? 'bg-zinc-100' : 'bg-zinc-950'}`}>
         
-        {/* Tab Navigation */}
-        <div className="px-4 pt-4 overflow-x-auto scrollbar-hide">
-          <div className="flex space-x-1">
+        {/* PAYMENT LOCK MODAL */}
+        <AnimatePresence>
+            {showPaymentLock && (
+                <div className="absolute inset-0 z-50">
+                    <PaymentLock onPaymentVerified={() => { setIsPaid(true); setShowPaymentLock(false); }} />
+                    <button 
+                        onClick={() => setShowPaymentLock(false)}
+                        className="absolute top-4 right-4 p-2 text-zinc-500 hover:text-white z-50"
+                    >
+                        <X className="w-6 h-6" />
+                    </button>
+                </div>
+            )}
+        </AnimatePresence>
+
+        {/* Toast for Copy */}
+        <AnimatePresence>
+            {showCopyToast && (
+                <motion.div 
+                    initial={{ opacity: 0, y: -20 }} 
+                    animate={{ opacity: 1, y: 0 }} 
+                    exit={{ opacity: 0, y: -20 }}
+                    className="absolute top-4 left-1/2 -translate-x-1/2 z-50 flex items-center gap-2 px-4 py-2 bg-green-600 text-white text-xs font-bold rounded-full shadow-lg"
+                >
+                    <Check className="w-3.5 h-3.5" /> Copied to Clipboard
+                </motion.div>
+            )}
+        </AnimatePresence>
+
+      <div className={`flex flex-col border-b shrink-0 ${isLightMode ? 'bg-white border-zinc-200' : 'bg-zinc-900/30 border-zinc-800'}`}>
+        {/* Tabs - Scrollable on mobile */}
+        <div className="px-2 sm:px-4 pt-4 overflow-x-auto scrollbar-hide w-full">
+          <div className="flex space-x-1 min-w-max">
             {tabs.map((tab) => (
               <button
                 key={tab.id}
                 onClick={() => setActiveTab(tab.id)}
-                className={`relative px-4 py-2 text-xs font-medium rounded-t-lg transition-all border-t border-x ${
+                className={`px-3 sm:px-4 py-2 text-[10px] sm:text-xs font-medium rounded-t-lg transition-all border-t border-x flex items-center gap-2 whitespace-nowrap ${
                   activeTab === tab.id
-                    ? 'text-white bg-zinc-950 border-zinc-800 border-b-zinc-950 translate-y-[1px] z-10'
-                    : 'text-zinc-500 bg-zinc-900/50 border-transparent hover:text-zinc-300 hover:bg-zinc-800'
+                    ? isLightMode 
+                        ? 'text-zinc-900 bg-white border-zinc-200 border-b-white'
+                        : 'text-white bg-zinc-950 border-zinc-800 border-b-zinc-950'
+                    : 'text-zinc-500 border-transparent hover:bg-zinc-800/50'
                 }`}
               >
-                <div className="flex items-center gap-2">
-                  <tab.icon className={`w-3.5 h-3.5 ${activeTab === tab.id ? 'text-orange-500' : ''}`} />
+                  {loadingStates[tab.id] ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <tab.icon className={`w-3.5 h-3.5 ${activeTab === tab.id ? 'text-orange-500' : ''}`} />}
                   {tab.label}
-                </div>
               </button>
             ))}
           </div>
         </div>
 
-        {/* Action Toolbar */}
-        <div className="px-6 py-2 flex items-center justify-between border-t border-zinc-800 bg-zinc-900/50">
-            <div className="flex items-center gap-4">
-                <div className="flex items-center gap-2">
-                  <div className={`w-2 h-2 rounded-full ${loading ? 'bg-orange-500 animate-pulse' : 'bg-green-500'}`}></div>
-                  <span className="text-[10px] font-mono text-zinc-500 uppercase tracking-wider hidden sm:inline">
-                    {loading ? 'GENERATING_ASSETS...' : 'READY_TO_EXPORT'}
-                  </span>
-                </div>
-                
-                {/* Email Specific Toolbar */}
-                {activeTab === GeneratorType.EMAIL_TEMPLATE && (
-                   <div className="flex items-center gap-2 pl-4 border-l border-zinc-700/50">
-                      <span className="text-[10px] text-zinc-500 font-mono">RECIPIENT:</span>
-                      <div className="relative group">
-                        <select 
-                            value={emailRecipient}
-                            onChange={(e) => {
-                                setEmailRecipient(e.target.value);
-                                // Trigger regeneration slightly after change or manual button
-                            }}
-                            className="bg-zinc-800 text-xs text-white border border-zinc-700 rounded pl-2 pr-6 py-1 appearance-none focus:border-orange-500 outline-none cursor-pointer"
+        {/* Toolbar - Scrollable on Mobile */}
+        <div className={`px-2 sm:px-4 py-2 flex items-center gap-3 border-t overflow-x-auto scrollbar-hide w-full ${isLightMode ? 'bg-zinc-50 border-zinc-200' : 'bg-zinc-900/50 border-zinc-800'}`}>
+            <div className="flex items-center gap-2 sm:gap-4 min-w-max">
+                 {activeTab === GeneratorType.ATS_RESUME && (
+                    <div className="flex items-center gap-2">
+                        <button
+                            onClick={() => setTailorExperience(!tailorExperience)}
+                            className={`flex items-center gap-1.5 px-2 py-1 rounded text-[10px] border transition-all ${tailorExperience ? 'bg-orange-500/10 border-orange-500 text-orange-500' : 'border-zinc-700 text-zinc-500'}`}
                         >
-                            <option value="Recruiter">Recruiter</option>
-                            <option value="Hiring Manager">Hiring Manager</option>
-                            <option value="LinkedIn Connection">LinkedIn Peer</option>
+                            <Wand2 className="w-3 h-3" /> <span className="hidden sm:inline">Update Past Experience</span><span className="sm:hidden">Update Exp</span>
+                        </button>
+                        
+                        <div className="h-4 w-[1px] bg-zinc-700 mx-1 sm:mx-2"></div>
+                        
+                        {ACCENT_COLORS.map(color => (
+                            <button
+                                key={color.name}
+                                onClick={() => setAccentColor(color)}
+                                className={`w-3 h-3 rounded-full border ${accentColor.name === color.name ? 'border-white scale-110' : 'border-transparent opacity-50'}`}
+                                style={{ backgroundColor: color.value }}
+                            />
+                        ))}
+                    </div>
+                )}
+                
+                {activeTab === GeneratorType.EMAIL_TEMPLATE && (
+                    <div className="flex items-center gap-2">
+                        <select
+                            value={emailChannel}
+                            onChange={(e) => setEmailChannel(e.target.value as any)}
+                            className={`text-[10px] border rounded p-1 ${isLightMode ? 'bg-white text-zinc-900 border-zinc-300' : 'bg-zinc-800 border-zinc-700 text-white'}`}
+                        >
+                            <option value="Email">Email</option>
+                            <option value="LinkedIn">LinkedIn</option>
                         </select>
-                        <ChevronDown className="w-3 h-3 text-zinc-400 absolute right-1.5 top-1.5 pointer-events-none" />
-                      </div>
-                      <button 
-                        onClick={() => handleGenerate(activeTab, true)}
-                        className="p-1 bg-zinc-800 hover:bg-orange-600 rounded text-zinc-400 hover:text-white transition-colors"
-                        title="Regenerate for this recipient"
-                      >
-                         <Sparkles className="w-3 h-3" />
-                      </button>
-                   </div>
+                        
+                        {emailChannel === 'Email' && (
+                             <select
+                                value={emailScenario}
+                                onChange={(e) => setEmailScenario(e.target.value)}
+                                className={`text-[10px] border rounded p-1 ${isLightMode ? 'bg-white text-zinc-900 border-zinc-300' : 'bg-zinc-800 border-zinc-700 text-white'}`}
+                            >
+                                <option value="Follow-up">Follow-up</option>
+                                <option value="Networking">Networking</option>
+                                <option value="Accept Offer">Accept Offer</option>
+                                <option value="Decline Offer">Decline</option>
+                            </select>
+                        )}
+                        <button onClick={() => handleGenerate(activeTab, true)} className="text-[10px] text-orange-500 underline">Generate</button>
+                    </div>
                 )}
             </div>
             
-            <div className="flex items-center gap-2">
-                <button
-                    onClick={() => setShowSettings(!showSettings)}
-                    className={`p-1.5 rounded transition-colors ${showSettings ? 'bg-orange-500/20 text-orange-500' : 'text-zinc-400 hover:text-white hover:bg-zinc-800'}`}
-                    title="Document Settings"
+            <div className="flex items-center gap-2 ml-auto min-w-max">
+                <select 
+                    value={selectedLanguage}
+                    onChange={(e) => { setSelectedLanguage(e.target.value); handleGenerate(activeTab, true); }}
+                    className={`text-[10px] border rounded p-1 ${isLightMode ? 'bg-white text-zinc-900 border-zinc-300' : 'bg-zinc-800 text-white border-zinc-700'}`}
                 >
-                    <Settings className="w-3.5 h-3.5" />
-                </button>
+                    {LANGUAGES.map(lang => <option key={lang} value={lang}>{lang}</option>)}
+                </select>
+
+                <div className="h-4 w-[1px] bg-zinc-700 mx-1 sm:mx-2"></div>
                 
-                <button
-                    onClick={handleShare}
-                    className="p-1.5 text-zinc-400 hover:text-white hover:bg-zinc-800 rounded transition-colors flex items-center gap-1 relative"
-                    title="Create Share Link"
+                 {/* Toggle Edit Mode */}
+                 <button
+                    onClick={() => setIsEditing(!isEditing)}
+                    className={`flex items-center gap-1.5 px-3 py-1.5 rounded text-[10px] sm:text-xs font-medium border transition-colors ${isEditing ? 'bg-orange-500 text-white border-orange-600' : 'bg-zinc-800 text-zinc-300 border-zinc-700'}`}
                 >
-                    {shared ? <Check className="w-3.5 h-3.5 text-green-500" /> : <Share2 className="w-3.5 h-3.5" />}
-                    <span className="text-[10px] font-bold font-mono hidden sm:inline">SHARE</span>
+                    {isEditing ? 'Done Editing' : 'Manual Edit'}
                 </button>
 
-                <div className="h-4 w-[1px] bg-zinc-800 mx-1"></div>
+                <button
+                    onClick={() => setIsLightMode(!isLightMode)}
+                    className={`p-1.5 rounded transition-colors ${isLightMode ? 'bg-zinc-200 hover:bg-zinc-300' : 'hover:bg-zinc-800'}`}
+                >
+                    {isLightMode ? <Moon className="w-3.5 h-3.5 text-zinc-600" /> : <Sun className="w-3.5 h-3.5 text-zinc-400" />}
+                </button>
                 
                 <button
-                    onClick={handleDownloadCSV}
-                    disabled={!!isDownloading}
-                    className="p-1.5 text-zinc-400 hover:text-white hover:bg-zinc-800 rounded transition-colors flex items-center gap-1"
-                    title="Export CSV"
+                    onClick={() => setShowChat(!showChat)}
+                    className={`flex items-center gap-1.5 px-3 py-1.5 rounded text-[10px] sm:text-xs font-medium border transition-colors ${showChat ? 'bg-orange-500 text-white border-orange-600' : 'bg-zinc-800 text-zinc-300 border-zinc-700'}`}
                 >
-                    {isDownloading === 'csv' ? <Loader2 className="w-3 h-3 animate-spin" /> : <span className="text-[10px] font-bold font-mono">CSV</span>}
+                    <MessageSquare className="w-3.5 h-3.5" /> <span className="hidden sm:inline">Refine</span>
                 </button>
-                <button
-                    onClick={handleDownloadODT}
-                    disabled={!!isDownloading}
-                    className="p-1.5 text-zinc-400 hover:text-white hover:bg-zinc-800 rounded transition-colors flex items-center gap-1"
-                    title="Export OSF/ODT (OpenDocument)"
-                >
-                    {isDownloading === 'odt' ? <Loader2 className="w-3 h-3 animate-spin" /> : <span className="text-[10px] font-bold font-mono">ODT</span>}
-                </button>
-                <button
-                    onClick={handleDownloadPDF}
-                    disabled={!!isDownloading}
-                    className="flex items-center gap-1.5 px-3 py-1 bg-zinc-800 hover:bg-zinc-700 text-zinc-200 text-[10px] font-bold rounded border border-zinc-700 transition-colors ml-1 disabled:opacity-50"
-                >
-                    {isDownloading === 'pdf' ? <Loader2 className="w-3 h-3 animate-spin" /> : <FileDown className="w-3 h-3" />}
-                    PDF
-                </button>
-                <button
-                    onClick={copyToClipboard}
-                    className="flex items-center gap-1.5 px-3 py-1 bg-orange-600 hover:bg-orange-500 text-white text-[10px] font-bold rounded shadow-lg shadow-orange-900/20 transition-colors ml-1"
-                >
-                    {copied ? <Check className="w-3 h-3" /> : <Copy className="w-3 h-3" />}
-                    {copied ? 'COPIED' : 'COPY'}
-                </button>
+
+                <div className="flex gap-1">
+                    <button
+                        onClick={handleCopyText}
+                        className={`flex items-center gap-1.5 px-3 py-1.5 text-[10px] sm:text-xs font-bold rounded transition-colors border ${isLightMode ? 'bg-white text-zinc-700 border-zinc-300 hover:bg-zinc-50' : 'bg-zinc-800 hover:bg-zinc-700 text-zinc-300 border-zinc-700'}`}
+                    >
+                        <Copy className="w-3.5 h-3.5" />
+                    </button>
+                    
+                    {/* DOWNLOAD BUTTONS WITH PAYMENT LOCK */}
+                    <button
+                        onClick={handleDownloadClick}
+                        disabled={!!isDownloading}
+                        className="flex items-center gap-1.5 px-3 py-1.5 bg-zinc-100 hover:bg-white text-black text-[10px] sm:text-xs font-bold rounded transition-colors disabled:opacity-50 relative"
+                    >
+                        {isDownloading ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : (isPaid ? <Download className="w-3.5 h-3.5" /> : <Lock className="w-3 h-3 text-orange-600" />)}
+                        PDF
+                    </button>
+                    <button
+                        onClick={handleDownloadTXT}
+                        className={`flex items-center gap-1.5 px-3 py-1.5 text-[10px] sm:text-xs font-bold rounded transition-colors border ${isLightMode ? 'bg-white text-zinc-700 border-zinc-300 hover:bg-zinc-50' : 'bg-zinc-800 hover:bg-zinc-700 text-zinc-300 border-zinc-700'}`}
+                    >
+                        TXT
+                    </button>
+                </div>
             </div>
         </div>
       </div>
 
-      {/* 2. Editor / Content Area */}
-      <div className="flex-1 overflow-y-auto custom-scrollbar relative p-8 md:px-12 max-w-5xl mx-auto w-full">
-         
-         {/* Download Error Toast */}
-         <AnimatePresence>
-            {downloadError && (
-                 <motion.div 
-                    initial={{ opacity: 0, y: -20 }}
-                    animate={{ opacity: 1, y: 0 }}
-                    exit={{ opacity: 0, y: -20 }}
-                    className="absolute top-4 left-1/2 -translate-x-1/2 z-50 bg-red-950/80 border border-red-900 text-red-200 px-4 py-2 rounded-lg text-xs flex items-center gap-2 backdrop-blur-md shadow-xl"
-                 >
-                    <AlertTriangle className="w-4 h-4" />
-                    {downloadError}
-                    <button onClick={() => setDownloadError(null)} className="ml-2 hover:text-white"><X className="w-3 h-3" /></button>
-                 </motion.div>
-            )}
-             {shared && (
-                 <motion.div 
-                    initial={{ opacity: 0, y: -20 }}
-                    animate={{ opacity: 1, y: 0 }}
-                    exit={{ opacity: 0, y: -20 }}
-                    className="absolute top-4 left-1/2 -translate-x-1/2 z-50 bg-green-950/80 border border-green-900 text-green-200 px-4 py-2 rounded-lg text-xs flex items-center gap-2 backdrop-blur-md shadow-xl"
-                 >
-                    <Link className="w-4 h-4" />
-                    Secure Link Copied to Clipboard
-                 </motion.div>
-            )}
-         </AnimatePresence>
-
-         {loading ? (
-            <div className="absolute inset-0 flex flex-col items-center justify-center bg-zinc-950/80 backdrop-blur-[1px] z-10">
-              <div className="relative mb-4">
-                 <div className="w-12 h-12 border-2 border-zinc-800 rounded-full"></div>
-                 <div className="absolute inset-0 w-12 h-12 border-2 border-orange-500 border-t-transparent rounded-full animate-spin"></div>
-              </div>
-              <p className="text-zinc-500 font-mono text-xs animate-pulse">Processing natural language...</p>
-            </div>
-         ) : null}
-
-         {error && (
-            <div className="absolute inset-0 flex flex-col items-center justify-center bg-zinc-950 z-20">
-                <div className="p-6 bg-red-950/20 border border-red-900/30 rounded-xl text-center max-w-md">
-                    <div className="w-12 h-12 rounded-full bg-red-900/20 flex items-center justify-center mx-auto mb-4">
-                        <X className="w-6 h-6 text-red-500" />
-                    </div>
-                    <h3 className="text-red-400 font-bold mb-2">Generation Failed</h3>
-                    <p className="text-zinc-400 text-sm mb-6 leading-relaxed">{error}</p>
-                    <button 
-                    onClick={() => handleGenerate(activeTab, true)}
-                    className="px-6 py-2 bg-red-900/30 hover:bg-red-900/50 text-red-200 rounded-lg text-xs font-mono border border-red-800/50 transition-colors"
-                    >
-                    RETRY OPERATION
-                    </button>
+      <div className="flex flex-1 overflow-hidden">
+          <div className={`flex-1 overflow-y-auto custom-scrollbar p-4 sm:p-8 md:px-12 max-w-5xl mx-auto w-full relative transition-colors duration-300 ${isLightMode ? 'bg-white' : 'bg-zinc-950'}`}>
+             {loadingStates[activeTab] && (
+                <div className={`absolute inset-0 flex flex-col items-center justify-center z-10 backdrop-blur-[1px] ${isLightMode ? 'bg-white/80' : 'bg-zinc-950/80'}`}>
+                  <Loader2 className="w-8 h-8 text-orange-500 animate-spin mb-2" />
+                  <p className="font-mono text-xs text-zinc-500">Generating...</p>
                 </div>
-            </div>
-         )}
+             )}
 
-         <AnimatePresence mode="wait">
-             <motion.div
-              key={activeTab}
-              initial={{ opacity: 0, y: 10 }}
-              animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0, y: -10 }}
-              transition={{ duration: 0.2 }}
-              id="generated-content"
-              className="prose prose-invert prose-zinc max-w-none prose-headings:font-sans prose-headings:tracking-tight prose-p:leading-relaxed prose-li:text-zinc-300 prose-strong:text-white pb-20"
-             >
-                {generatedData[activeTab] ? (
-                    <ReactMarkdown
-                        components={{
-                            h1: ({node, ...props}) => <h1 className="text-3xl font-bold text-white mb-6 pb-4 border-b border-zinc-800" {...props} />,
-                            h2: ({node, ...props}) => <h2 className="text-xl font-semibold text-orange-500 mt-8 mb-4 flex items-center gap-2" {...props} />,
-                            h3: ({node, ...props}) => <h3 className="text-lg font-medium text-white mt-6 mb-3" {...props} />,
-                            ul: ({node, ...props}) => <ul className="space-y-2 my-4 pl-4" {...props} />,
-                            li: ({node, ...props}) => (
-                                <li className="flex items-start gap-2 text-zinc-300">
-                                <span className="mt-2.5 w-1 h-1 bg-zinc-500 rounded-full shrink-0" />
-                                <span className="flex-1">{props.children}</span>
-                                </li>
-                            ),
-                            p: ({node, ...props}) => <p className="mb-4 text-zinc-300 whitespace-pre-wrap break-words" {...props} />,
-                            code: ({node, ...props}) => <code className="bg-zinc-900 text-orange-400 px-1.5 py-0.5 rounded border border-zinc-800 text-xs font-mono" {...props} />,
-                            blockquote: ({node, ...props}) => <blockquote className="border-l-2 border-orange-500 pl-4 py-1 my-4 bg-zinc-900/30 italic text-zinc-400 rounded-r-lg" {...props} />,
-                        }}
-                    >
-                        {generatedData[activeTab]}
-                    </ReactMarkdown>
-                ) : !loading && (
-                    <div className="flex flex-col items-center justify-center py-20 opacity-50">
-                        <Printer className="w-12 h-12 text-zinc-700 mb-4" />
-                        <p className="text-zinc-600 font-mono text-sm">Waiting for content...</p>
-                    </div>
-                )}
-             </motion.div>
-         </AnimatePresence>
+             <AnimatePresence mode="wait">
+                 <motion.div
+                  key={activeTab}
+                  initial={{ opacity: 0 }}
+                  animate={{ opacity: 1 }}
+                  exit={{ opacity: 0 }}
+                  className="pb-20 min-h-[500px]"
+                 >
+                    {generatedData[activeTab] ? renderContent() : !loadingStates[activeTab] && (
+                        <div className="flex flex-col items-center justify-center py-20 opacity-50">
+                            <p className="text-zinc-500 font-mono text-sm">Ready to generate.</p>
+                            <button onClick={() => handleGenerate(activeTab, true)} className="mt-2 text-xs text-orange-500 hover:underline">Start</button>
+                        </div>
+                    )}
+                 </motion.div>
+             </AnimatePresence>
+          </div>
+
+          <AnimatePresence>
+            {showChat && (
+                <ChatSidebar 
+                    show={showChat}
+                    onClose={() => setShowChat(false)}
+                    onRefine={handleRefine}
+                    onQuickAction={handleQuickAction}
+                    chatInput={chatInput}
+                    setChatInput={setChatInput}
+                    isRefining={isRefining}
+                    isLightMode={isLightMode}
+                />
+            )}
+          </AnimatePresence>
       </div>
     </div>
   );

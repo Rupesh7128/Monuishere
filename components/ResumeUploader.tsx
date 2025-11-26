@@ -1,14 +1,15 @@
 import React, { useCallback } from 'react';
-import { Upload, FileText, X, CheckCircle2 } from 'lucide-react';
+import { Upload, FileText, X, CheckCircle2, Eye } from 'lucide-react';
 import { motion } from 'framer-motion';
 import { FileData } from '../types';
 
 interface ResumeUploaderProps {
   onFileUpload: (file: FileData | null) => void;
   currentFile: FileData | null;
+  onPreview?: () => void;
 }
 
-const ResumeUploader: React.FC<ResumeUploaderProps> = ({ onFileUpload, currentFile }) => {
+const ResumeUploader: React.FC<ResumeUploaderProps> = ({ onFileUpload, currentFile, onPreview }) => {
   
   const handleFileChange = useCallback(async (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
@@ -82,7 +83,17 @@ const ResumeUploader: React.FC<ResumeUploaderProps> = ({ onFileUpload, currentFi
 
           <FileText className="w-10 h-10 text-orange-500 mb-3" />
           <p className="text-sm font-bold text-white max-w-[90%] truncate">{currentFile.name}</p>
-          <p className="text-xs text-zinc-500 font-mono mt-1">Ready for parsing</p>
+          <div className="flex items-center gap-3 mt-3">
+             <span className="text-xs text-zinc-500 font-mono">Ready for parsing</span>
+             {onPreview && (
+                <button 
+                  onClick={(e) => { e.stopPropagation(); onPreview(); }}
+                  className="flex items-center gap-1 px-2 py-1 bg-zinc-800 hover:bg-zinc-700 rounded text-[10px] text-zinc-300 transition-colors border border-zinc-700"
+                >
+                    <Eye className="w-3 h-3" /> View PDF
+                </button>
+             )}
+          </div>
           
           <button 
             onClick={removeFile}

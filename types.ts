@@ -20,7 +20,9 @@ export enum GeneratorType {
   RESUME_SUGGESTIONS = 'Resume Suggestions',
   COVER_LETTER = 'Cover Letter',
   INTERVIEW_PREP = 'Interview Q&A',
-  EMAIL_TEMPLATE = 'Cold Email',
+  EMAIL_TEMPLATE = 'Cold Outreach',
+  LEARNING_PATH = 'Learning Path',
+  MARKET_INSIGHTS = 'Market Insights',
 }
 
 export interface GeneratedContent {
