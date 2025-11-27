@@ -2,7 +2,7 @@
 import React, { useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { AnalysisResult } from '../types';
-import { AlertTriangle, CheckCircle, Target, FileSearch, TrendingUp, Download, ShieldAlert, Info, User } from 'lucide-react';
+import { AlertTriangle, CheckCircle, Target, FileSearch, TrendingUp, Download, ShieldAlert, Info, User, BrainCircuit, Globe, Briefcase, DollarSign } from 'lucide-react';
 import { PieChart, Pie, Cell, ResponsiveContainer, Tooltip } from 'recharts';
 
 interface AnalysisDashboardProps {
@@ -41,7 +41,7 @@ const CustomChartTooltip = ({ active, payload }: any) => {
     return (
       <div className="bg-zinc-950/80 border border-white/10 p-4 rounded-xl shadow-2xl max-w-[200px] backdrop-blur-md z-50">
         <p className="text-xs font-mono text-zinc-500 uppercase font-bold mb-1">{payload[0].name}</p>
-        <p className={`text-xl font-bold ${payload[0].name === 'Match Score' ? 'text-orange-500' : 'text-zinc-500'}`}>
+        <p className={`text-xl font-bold ${payload[0].name.includes('Match') ? 'text-orange-500' : 'text-zinc-500'}`}>
             {payload[0].value}%
         </p>
       </div>
@@ -51,20 +51,29 @@ const CustomChartTooltip = ({ active, payload }: any) => {
 };
 
 const AnalysisDashboard: React.FC<AnalysisDashboardProps> = ({ result }) => {
-  const scoreData = [
-    { name: 'Match Score', value: result.atsScore },
+  const atsData = [
+    { name: 'ATS Match', value: result.atsScore },
     { name: 'Gap', value: 100 - result.atsScore },
   ];
+  const relevanceData = [
+    { name: 'Relevance Match', value: result.relevanceScore || 0 },
+    { name: 'Gap', value: 100 - (result.relevanceScore || 0) },
+  ];
+  
   const COLORS = ['#F97316', '#27272A'];
+  const COLORS_RELEVANCE = ['#2563EB', '#27272A'];
 
   const handleDownloadCSV = () => {
     const headers = ["Category", "Details"];
     const rows = [
       ["ATS Score", result.atsScore.toString()],
+      ["Relevance Score", result.relevanceScore.toString()],
+      ["Role Fit", `"${result.roleFitAnalysis.replace(/"/g, '""')}"`],
       ["Summary", `"${result.summary.replace(/"/g, '""')}"`],
       ["Missing Keywords", `"${result.missingKeywords.join(", ")}"`],
       ["Key Strengths", `"${result.keyStrengths.join(", ")}"`],
-      ["Critical Issues", `"${result.criticalIssues.join(", ")}"`]
+      ["Critical Issues", `"${result.criticalIssues.join(", ")}"`],
+      ["Languages", `"${(result.languages || []).join(", ")}"`]
     ];
     const csvContent = "data:text/csv;charset=utf-8," + headers.join(",") + "\n" + rows.map(e => e.join(",")).join("\n");
     const encodedUri = encodeURI(csvContent);
@@ -76,7 +85,8 @@ const AnalysisDashboard: React.FC<AnalysisDashboardProps> = ({ result }) => {
     document.body.removeChild(link);
   };
 
-  const isHighQuality = result.atsScore > 85;
+  const isLowRelevance = (result.relevanceScore || 0) < 50 && result.relevanceScore > 0;
+  const isNoJD = result.relevanceScore === 0 && result.roleFitAnalysis.includes("No Job Description");
 
   return (
     <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 w-full max-w-7xl mx-auto pb-8">
@@ -97,26 +107,47 @@ const AnalysisDashboard: React.FC<AnalysisDashboardProps> = ({ result }) => {
         </button>
       </div>
 
-      {/* Score Card */}
-      <div className="col-span-1 lg:row-span-2 bg-zinc-900/60 backdrop-blur-xl border border-white/10 rounded-2xl p-5 flex flex-col items-center justify-between relative overflow-hidden shadow-xl min-h-[280px]">
+      {/* Role Mismatch Warning */}
+      {isLowRelevance && (
+        <div className="col-span-1 md:col-span-2 lg:col-span-4 bg-red-950/20 border border-red-900/40 p-4 rounded-xl flex items-start gap-3">
+             <AlertTriangle className="w-5 h-5 text-red-500 shrink-0 mt-0.5" />
+             <div>
+                 <h4 className="text-red-400 font-bold text-sm uppercase mb-1">Role Mismatch Detected</h4>
+                 <p className="text-red-300/80 text-xs">{result.roleFitAnalysis || "Candidate profile does not strongly align with the Job Description requirements."}</p>
+             </div>
+        </div>
+      )}
+      
+      {isNoJD && (
+        <div className="col-span-1 md:col-span-2 lg:col-span-4 bg-zinc-800/50 border border-zinc-700/50 p-4 rounded-xl flex items-start gap-3">
+             <Info className="w-5 h-5 text-zinc-400 shrink-0 mt-0.5" />
+             <div>
+                 <h4 className="text-zinc-300 font-bold text-sm uppercase mb-1">Missing JD</h4>
+                 <p className="text-zinc-500 text-xs">Relevance scores unavailable because no Job Description was provided.</p>
+             </div>
+        </div>
+      )}
+
+      {/* Score Card: ATS */}
+      <div className="col-span-1 md:col-span-1 bg-zinc-900/60 backdrop-blur-xl border border-white/10 rounded-2xl p-5 flex flex-col items-center justify-between relative overflow-hidden shadow-xl min-h-[220px]">
         <div className="w-full flex justify-between items-center mb-2">
           <div className="flex items-center gap-2">
-              <h3 className="text-xs font-mono font-bold text-zinc-500 uppercase tracking-wider">ATS Score</h3>
-              <HoverTooltip content="0-100 score based on keyword matching and semantic relevance to the Job Description.">
+              <h3 className="text-xs font-mono font-bold text-zinc-500 uppercase tracking-wider">ATS Compliance</h3>
+              <HoverTooltip content="Calculated based on formatting, keyword density, and section parsing compatibility.">
                   <Info className="w-3.5 h-3.5 text-zinc-600 hover:text-orange-500 transition-colors" />
               </HoverTooltip>
           </div>
           <Target className="w-4 h-4 text-orange-500" />
         </div>
-        <div className="w-40 h-40 relative my-auto">
+        <div className="w-32 h-32 relative my-auto">
           <ResponsiveContainer width="100%" height="100%">
             <PieChart>
               <Pie
-                data={scoreData}
+                data={atsData}
                 cx="50%"
                 cy="50%"
-                innerRadius={55}
-                outerRadius={70}
+                innerRadius={35}
+                outerRadius={50}
                 startAngle={90}
                 endAngle={-270}
                 stroke="none"
@@ -124,7 +155,7 @@ const AnalysisDashboard: React.FC<AnalysisDashboardProps> = ({ result }) => {
                 cornerRadius={5}
                 paddingAngle={2}
               >
-                {scoreData.map((entry, index) => (
+                {atsData.map((entry, index) => (
                   <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />
                 ))}
               </Pie>
@@ -132,27 +163,100 @@ const AnalysisDashboard: React.FC<AnalysisDashboardProps> = ({ result }) => {
             </PieChart>
           </ResponsiveContainer>
           <div className="absolute inset-0 flex flex-col items-center justify-center pointer-events-none">
-            <span className="text-4xl font-bold text-white tracking-tighter">{result.atsScore}</span>
-            <span className="text-[10px] text-zinc-500 font-mono mt-1">/ 100</span>
+            <span className="text-3xl font-bold text-white tracking-tighter">{result.atsScore}</span>
+            <span className="text-[9px] text-zinc-500 font-mono mt-1">/ 100</span>
           </div>
         </div>
-        <div className="w-full text-center mt-4 p-2 rounded-xl bg-zinc-950/30 border border-white/5">
-          <p className={`text-sm font-bold ${result.atsScore > 85 ? 'text-green-500' : result.atsScore > 60 ? 'text-yellow-500' : 'text-red-500'}`}>
-            {result.atsScore > 85 ? 'High Compatibility' : result.atsScore > 60 ? 'Moderate Potential' : 'Low Match'}
-          </p>
+      </div>
+
+       {/* Score Card: Relevance */}
+       <div className="col-span-1 md:col-span-1 bg-zinc-900/60 backdrop-blur-xl border border-white/10 rounded-2xl p-5 flex flex-col items-center justify-between relative overflow-hidden shadow-xl min-h-[220px]">
+        <div className="w-full flex justify-between items-center mb-2">
+          <div className="flex items-center gap-2">
+              <h3 className="text-xs font-mono font-bold text-zinc-500 uppercase tracking-wider">Skill Match</h3>
+              <HoverTooltip content="0-100 score based on keyword presence and experience relevance.">
+                  <Info className="w-3.5 h-3.5 text-zinc-600 hover:text-blue-500 transition-colors" />
+              </HoverTooltip>
+          </div>
+          <BrainCircuit className="w-4 h-4 text-blue-500" />
+        </div>
+        <div className="w-32 h-32 relative my-auto">
+          <ResponsiveContainer width="100%" height="100%">
+            <PieChart>
+              <Pie
+                data={relevanceData}
+                cx="50%"
+                cy="50%"
+                innerRadius={35}
+                outerRadius={50}
+                startAngle={90}
+                endAngle={-270}
+                stroke="none"
+                dataKey="value"
+                cornerRadius={5}
+                paddingAngle={2}
+              >
+                {relevanceData.map((entry, index) => (
+                  <Cell key={`cell-${index}`} fill={COLORS_RELEVANCE[index % COLORS_RELEVANCE.length]} />
+                ))}
+              </Pie>
+              <Tooltip content={<CustomChartTooltip />} cursor={{ fill: 'transparent' }} />
+            </PieChart>
+          </ResponsiveContainer>
+          <div className="absolute inset-0 flex flex-col items-center justify-center pointer-events-none">
+            {isNoJD ? (
+                 <span className="text-xl font-bold text-zinc-600 tracking-tighter">N/A</span>
+            ) : (
+                <>
+                <span className="text-3xl font-bold text-white tracking-tighter">{result.relevanceScore || 0}</span>
+                <span className="text-3xl font-bold text-white tracking-tighter">{result.relevanceScore || 0}</span>
+                <span className="text-[9px] text-zinc-500 font-mono mt-1">/ 100</span>
+                </>
+            )}
+          </div>
         </div>
       </div>
 
       {/* Executive Summary */}
-      <div className="col-span-1 md:col-span-1 lg:col-span-3 bg-zinc-900/60 backdrop-blur-xl border border-white/10 rounded-2xl p-5 shadow-xl">
+      <div className="col-span-1 md:col-span-2 lg:col-span-2 bg-zinc-900/60 backdrop-blur-xl border border-white/10 rounded-2xl p-5 shadow-xl">
         <div className="flex items-center gap-2 mb-3">
             <TrendingUp className="w-4 h-4 text-orange-500" />
-            <h3 className="text-xs font-mono font-bold text-zinc-500 uppercase tracking-wider">Executive Summary</h3>
+            <h3 className="text-xs font-mono font-bold text-zinc-500 uppercase tracking-wider">Analysis Summary</h3>
         </div>
-        <p className="text-zinc-300 text-sm leading-relaxed font-light">
+        <p className="text-zinc-300 text-sm leading-relaxed font-light mb-4">
           {result.summary}
         </p>
+        <div className="p-3 bg-zinc-950/50 rounded-lg border border-white/5">
+             <h4 className="text-xs font-bold text-zinc-500 uppercase mb-1">Role Fit Verdict</h4>
+             <p className={`text-sm font-medium ${isLowRelevance ? 'text-red-400' : 'text-green-400'}`}>
+                 {result.roleFitAnalysis || "Analysis pending."}
+             </p>
+        </div>
       </div>
+
+      {/* Market Analysis - NEW */}
+      {result.marketAnalysis && (
+        <div className="col-span-1 md:col-span-2 lg:col-span-4 grid grid-cols-1 md:grid-cols-3 gap-4">
+            <div className="bg-zinc-900/60 border border-white/10 rounded-xl p-4 flex flex-col">
+                <div className="flex items-center gap-2 mb-2 text-zinc-500 uppercase text-xs font-bold">
+                    <DollarSign className="w-4 h-4 text-green-500" /> Est. Salary
+                </div>
+                <div className="text-xl font-bold text-white mt-auto">{result.marketAnalysis.salary || "N/A"}</div>
+            </div>
+            <div className="bg-zinc-900/60 border border-white/10 rounded-xl p-4 flex flex-col">
+                <div className="flex items-center gap-2 mb-2 text-zinc-500 uppercase text-xs font-bold">
+                    <Briefcase className="w-4 h-4 text-blue-500" /> Verdict
+                </div>
+                <div className="text-sm font-medium text-zinc-200 mt-auto leading-tight">{result.marketAnalysis.verdict || "N/A"}</div>
+            </div>
+            <div className="bg-zinc-900/60 border border-white/10 rounded-xl p-4 flex flex-col">
+                <div className="flex items-center gap-2 mb-2 text-zinc-500 uppercase text-xs font-bold">
+                    <Globe className="w-4 h-4 text-purple-500" /> Culture/WFH
+                </div>
+                <div className="text-sm font-medium text-zinc-200 mt-auto leading-tight">{result.marketAnalysis.culture || "N/A"}</div>
+            </div>
+        </div>
+      )}
 
       {/* Missing Keywords */}
       <div className="col-span-1 md:col-span-1 lg:col-span-2 bg-zinc-900/60 backdrop-blur-xl border border-white/10 rounded-2xl p-5 shadow-xl">
@@ -183,10 +287,10 @@ const AnalysisDashboard: React.FC<AnalysisDashboardProps> = ({ result }) => {
       {/* Critical Issues - Honest Reporting */}
       <div className="col-span-1 md:col-span-1 bg-zinc-900/60 backdrop-blur-xl border border-white/10 rounded-2xl p-5 shadow-xl">
         <div className="flex items-center gap-2 mb-3">
-          <ShieldAlert className={`w-4 h-4 ${isHighQuality ? 'text-green-500' : 'text-yellow-500'}`} />
+          <ShieldAlert className={`w-4 h-4 ${result.atsScore > 85 ? 'text-green-500' : 'text-yellow-500'}`} />
            <div className="flex items-center gap-2">
                 <h3 className="text-xs font-mono font-bold text-zinc-500 uppercase tracking-wider">
-                    {isHighQuality ? 'Health Check' : 'Risks'}
+                    {result.atsScore > 85 ? 'Health Check' : 'Risks'}
                 </h3>
            </div>
         </div>
@@ -206,19 +310,41 @@ const AnalysisDashboard: React.FC<AnalysisDashboardProps> = ({ result }) => {
         </ul>
       </div>
 
-      {/* Strengths */}
+      {/* Strengths & Languages */}
       <div className="col-span-1 md:col-span-2 lg:col-span-4 bg-zinc-900/60 backdrop-blur-xl border border-white/10 rounded-2xl p-5 shadow-xl">
-        <div className="flex items-center gap-2 mb-3">
-          <CheckCircle className="w-4 h-4 text-green-500" />
-           <h3 className="text-xs font-mono font-bold text-zinc-500 uppercase tracking-wider">Core Strengths</h3>
-        </div>
-        <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-3">
-          {result.keyStrengths.map((strength, idx) => (
-            <div key={idx} className="flex items-center gap-3 p-2.5 rounded-lg bg-zinc-950/30 border border-white/5">
-              <div className="w-1.5 h-1.5 rounded-full bg-green-500 shrink-0"></div>
-              <span className="text-xs text-zinc-300 font-medium truncate">{strength}</span>
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+            <div>
+                 <div className="flex items-center gap-2 mb-3">
+                    <CheckCircle className="w-4 h-4 text-green-500" />
+                    <h3 className="text-xs font-mono font-bold text-zinc-500 uppercase tracking-wider">Core Strengths</h3>
+                </div>
+                <div className="flex flex-wrap gap-2">
+                {result.keyStrengths.map((strength, idx) => (
+                    <div key={idx} className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-zinc-950/30 border border-white/5">
+                        <div className="w-1.5 h-1.5 rounded-full bg-green-500 shrink-0"></div>
+                        <span className="text-xs text-zinc-300 font-medium">{strength}</span>
+                    </div>
+                ))}
+                </div>
             </div>
-          ))}
+
+            <div>
+                 <div className="flex items-center gap-2 mb-3">
+                    <Globe className="w-4 h-4 text-blue-500" />
+                    <h3 className="text-xs font-mono font-bold text-zinc-500 uppercase tracking-wider">Languages Detected</h3>
+                </div>
+                <div className="flex flex-wrap gap-2">
+                    {result.languages && result.languages.length > 0 ? (
+                        result.languages.map((lang, idx) => (
+                            <span key={idx} className="px-3 py-1.5 bg-blue-500/10 text-blue-400 border border-blue-500/20 rounded-lg text-xs font-medium">
+                                {lang}
+                            </span>
+                        ))
+                    ) : (
+                        <span className="text-xs text-zinc-500 italic">None explicitly detected.</span>
+                    )}
+                </div>
+            </div>
         </div>
       </div>
     </div>

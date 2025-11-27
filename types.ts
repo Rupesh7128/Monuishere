@@ -6,13 +6,23 @@ export interface ContactProfile {
   location: string;
 }
 
+export interface MarketAnalysis {
+  salary: string;
+  verdict: string;
+  culture: string;
+}
+
 export interface AnalysisResult {
-  atsScore: number;
+  atsScore: number; // Formatting & Compliance
+  relevanceScore: number; // JD Skill Match
+  roleFitAnalysis: string; // Brief explanation of fit
   contactProfile: ContactProfile;
+  languages: string[]; // Spoken languages
   missingKeywords: string[];
   criticalIssues: string[];
   keyStrengths: string[];
   summary: string;
+  marketAnalysis?: MarketAnalysis;
 }
 
 export enum GeneratorType {

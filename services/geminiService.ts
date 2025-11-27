@@ -9,6 +9,33 @@ const MODEL_REASONING = "gemini-3-pro-preview"; // Complex reasoning, Chatbot
 
 const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
 
+// --- UTILS ---
+
+/**
+ * Retries an async operation with exponential backoff.
+ */
+const retryOperation = async <T>(
+    operation: () => Promise<T>, 
+    maxRetries: number = 3, 
+    delayMs: number = 1000
+): Promise<T> => {
+    let lastError: any;
+    
+    for (let i = 0; i < maxRetries; i++) {
+        try {
+            return await operation();
+        } catch (error: any) {
+            lastError = error;
+            // Don't retry client-side errors (like invalid API key)
+            if (error.message?.includes("API Key") || error.message?.includes("401")) throw error;
+            
+            // Wait with exponential backoff
+            await new Promise(resolve => setTimeout(resolve, delayMs * Math.pow(2, i)));
+        }
+    }
+    throw lastError;
+};
+
 const withTimeout = <T>(promise: Promise<T>, ms: number, errorMessage: string): Promise<T> => {
     let timer: any;
     const timeoutPromise = new Promise<T>((_, reject) => {
@@ -20,21 +47,27 @@ const withTimeout = <T>(promise: Promise<T>, ms: number, errorMessage: string): 
     ]);
 };
 
-// Helper to clean JSON markdown
+// Robust JSON cleaner
 const cleanJsonOutput = (text: string): string => {
     let clean = text.trim();
+    // Remove markdown code blocks
     clean = clean.replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/\s*```$/i, '');
+    
+    // Find first '{' and last '}' to strip conversational preambles
     const firstBrace = clean.indexOf('{');
     const lastBrace = clean.lastIndexOf('}');
+    
     if (firstBrace !== -1 && lastBrace !== -1) {
         clean = clean.substring(firstBrace, lastBrace + 1);
     }
+    
     return clean;
 };
 
 // Helper to remove conversational filler
 const cleanMarkdownOutput = (text: string): string => {
-    const firstHeader = text.search(/^(#{1,3}\s|\*\*)/m);
+    // If text starts with "Here is...", remove it until the first header or bold
+    const firstHeader = text.search(/^(#{1,3}\s|\*\*|<div)/m);
     if (firstHeader !== -1) {
         return text.substring(firstHeader);
     }
@@ -44,10 +77,11 @@ const cleanMarkdownOutput = (text: string): string => {
 const getActionableError = (error: any): string => {
     const msg = error.message || '';
     if (msg.includes('401')) return "Invalid API Key. Please verify your configuration.";
-    if (msg.includes('429')) return "Rate limit exceeded. Please wait a moment and try again.";
+    if (msg.includes('429')) return "High traffic. Retrying analysis...";
     if (msg.includes('503')) return "AI Service temporarily unavailable. Please try again later.";
+    if (msg.includes('PasswordException')) return "This PDF is password protected. Please unlock it and try again.";
     if (msg.includes('NetworkError') || msg.includes('fetch')) return "Network error. Please check your internet connection.";
-    return `Analysis failed: ${msg}.`;
+    return `Analysis failed: ${msg.substring(0, 100)}.`;
 };
 
 export async function extractTextFromPdf(base64Data: string): Promise<string> {
@@ -73,6 +107,12 @@ export async function extractTextFromPdf(base64Data: string): Promise<string> {
 
     // @ts-ignore
     const loadingTask = window.pdfjsLib.getDocument({ data: bytes });
+    
+    // Handle password protected files
+    loadingTask.onPassword = (updatePassword: any, reason: any) => {
+        throw new Error("PasswordException: PDF is encrypted");
+    };
+
     const pdf = await loadingTask.promise;
     let fullText = '';
     const maxPages = Math.min(pdf.numPages, 15);
@@ -96,8 +136,11 @@ export async function extractTextFromPdf(base64Data: string): Promise<string> {
     }
 
     return fullText;
-  } catch (e) {
+  } catch (e: any) {
     console.error("PDF Extraction Failed:", e);
+    if (e.name === 'PasswordException' || e.message.includes('Password')) {
+        return "Error: The PDF is password protected. Please remove the password and upload again.";
+    }
     return "Error parsing PDF. Please ensure the file is a standard text-based PDF.";
   }
 }
@@ -117,7 +160,7 @@ export const calculateImprovedScore = async (
             JOB DESCRIPTION:
             ${jobDescription.substring(0, 5000)}
             
-            TASK: Calculate the ATS match score mathematically.
+            TASK: Calculate the RELEVANCE score.
             1. Extract the top 20 hard skills/keywords from the JD.
             2. Count how many appear in the Resume.
             3. Score = (Matches / Total Keywords) * 100.
@@ -172,40 +215,98 @@ export const refineContent = async (
     }
 };
 
+export const regenerateSection = async (
+    currentContent: string,
+    sectionName: string,
+    instruction: string,
+    jobDescription: string
+): Promise<string> => {
+    const prompt = `
+    You are an expert Resume Writer. 
+    
+    TASK: Regenerate ONLY the "${sectionName}" section of the resume based on the instruction below.
+    Keep the rest of the resume exactly as is.
+    
+    RESUME:
+    ${currentContent}
+    
+    INSTRUCTION FOR ${sectionName}:
+    "${instruction}"
+    
+    JOB DESCRIPTION CONTEXT:
+    ${jobDescription.substring(0, 1000)}...
+    
+    Output the FULL updated resume markdown.
+    `;
+    
+    try {
+        const response = await ai.models.generateContent({
+            model: MODEL_STANDARD,
+            contents: { text: prompt },
+            config: { temperature: 0.7 }
+        });
+        return cleanMarkdownOutput(response.text || currentContent);
+    } catch (error) {
+        throw new Error("Unable to regenerate section.");
+    }
+}
+
 export const analyzeResume = async (
   resumeFile: FileData,
   jobDescription: string
 ): Promise<AnalysisResult> => {
+  const jdText = jobDescription?.trim() || "NO_JD_PROVIDED";
+  
   const systemPrompt = `
-    You are an impartial, evidence-based ATS Algorithm.
+    You are an impartial, evidence-based ATS Algorithm and Career Coach.
     
     INPUT DATA:
     1. Resume Text
-    2. Job Description
+    2. Job Description (JD) OR Link. 
+       - If the JD input starts with 'http' or 'www' or looks like a URL, use your **Google Search** tool to access the link and extract the job details (Title, Requirements, Responsibilities).
+       - If JD is "NO_JD_PROVIDED", evaluate the resume for general ATS health only, set 'relevanceScore' to 0, and 'roleFitAnalysis' to "No Job Description provided for role fit analysis.".
     
-    TASK 1: EVIDENCE-BASED SCORING
-    - Extract mandatory hard skills from JD.
-    - Check for presence in Resume.
-    - Calculate Score = (Matches / Total Mandatory Skills) * 100.
+    TASK 1: DUAL SCORING SYSTEM
+    - **ATS Score (Formatting & Compliance)**: Evaluate parsing safety, header structure, date formats, file type, and section clarity. (0-100).
+    - **Relevance Score (Skill Match)**: Evaluate strict skill/experience match against the JD. (0-100). If NO JD, return 0.
     
-    TASK 2: HONEST ANALYSIS
-    - If the resume is good (Score > 85), DO NOT invent errors. Return an empty "criticalIssues" list or note "No major formatting issues found."
-    - Be strict but fair.
-    - Extract Candidate Contact Profile (Name, Email, Phone, LinkedIn, Location).
+    TASK 2: ROLE FIT ANALYSIS
+    - Provide a 1-sentence assessment. E.g., "Candidate is a strong match for Senior dev" or "Role Mismatch: Candidate background is Customer Support, JD is Engineering."
     
+    TASK 3: CONTACT PROFILE (Mobile Privacy)
+    - Extract Name, Email, Phone, LinkedIn.
+    - **Address**: ONLY extract if fully explicit (e.g., "123 Main St, NY"). Do NOT infer or hallucinate location from area codes or company names. If unsure, leave generic (e.g., "New York, NY" or empty).
+    - **Languages**: Extract spoken/written languages (e.g., English, Spanish). Do NOT extract programming languages here.
+    
+    TASK 4: HONEST ANALYSIS
+    - Extract missing keywords.
+    - List critical issues (Parsing errors, severe mismatches).
+    
+    TASK 5: MARKET INSIGHTS
+    - Analyze the role and provide:
+      - Estimated Salary Range (for the role/location inferred).
+      - Brief Verdict (Good role? Competitive?).
+      - Culture/WFH vibe (inferred from JD).
+
     Return structured JSON:
     atsScore: number
+    relevanceScore: number
+    roleFitAnalysis: string
     contactProfile: object
+    languages: array
     missingKeywords: array
-    criticalIssues: array (real errors only)
+    criticalIssues: array
     keyStrengths: array
     summary: string
+    marketAnalysis: object { salary, verdict, culture }
   `;
   
   const responseSchema = {
     type: Type.OBJECT,
     properties: {
-      atsScore: { type: Type.INTEGER },
+      atsScore: { type: Type.INTEGER, description: "Formatting and parsing compliance score" },
+      relevanceScore: { type: Type.INTEGER, description: "Skill and experience match score" },
+      roleFitAnalysis: { type: Type.STRING, description: "Brief role fit verdict" },
       contactProfile: {
         type: Type.OBJECT,
         properties: {
@@ -216,32 +317,44 @@ export const analyzeResume = async (
             location: { type: Type.STRING },
         }
       },
+      languages: { type: Type.ARRAY, items: { type: Type.STRING }, description: "Spoken languages like English, Spanish" },
       missingKeywords: { type: Type.ARRAY, items: { type: Type.STRING } },
       criticalIssues: { type: Type.ARRAY, items: { type: Type.STRING } },
       keyStrengths: { type: Type.ARRAY, items: { type: Type.STRING } },
       summary: { type: Type.STRING },
+      marketAnalysis: {
+          type: Type.OBJECT,
+          properties: {
+              salary: { type: Type.STRING },
+              verdict: { type: Type.STRING },
+              culture: { type: Type.STRING }
+          }
+      }
     },
-    required: ["atsScore", "contactProfile", "missingKeywords", "criticalIssues", "keyStrengths", "summary"],
+    required: ["atsScore", "relevanceScore", "roleFitAnalysis", "contactProfile", "languages", "missingKeywords", "criticalIssues", "keyStrengths", "summary"],
   };
 
   try {
-    const response = await withTimeout<GenerateContentResponse>(
-        ai.models.generateContent({
-            model: MODEL_REASONING,
-            contents: {
-                parts: [
-                { inlineData: { mimeType: resumeFile.type, data: resumeFile.base64 } },
-                { text: systemPrompt + `\n\nJob Description:\n${jobDescription}` },
-                ],
-            },
-            config: { 
-                responseMimeType: "application/json", 
-                responseSchema: responseSchema,
-                thinkingConfig: { thinkingBudget: 32768 }
-            },
-        }),
-        120000, 
-        "Analysis timed out."
+    const response = await retryOperation(() => 
+        withTimeout<GenerateContentResponse>(
+            ai.models.generateContent({
+                model: MODEL_REASONING,
+                contents: {
+                    parts: [
+                    { inlineData: { mimeType: resumeFile.type, data: resumeFile.base64 } },
+                    { text: systemPrompt + `\n\nJob Description / Link:\n${jdText}` },
+                    ],
+                },
+                config: { 
+                    responseMimeType: "application/json", 
+                    responseSchema: responseSchema,
+                    thinkingConfig: { thinkingBudget: 32768 },
+                    tools: [{ googleSearch: {} }] // Enable search for URL extraction and market data
+                },
+            }),
+            120000, 
+            "Analysis timed out."
+        )
     );
 
     if (response.text) {
@@ -295,14 +408,19 @@ export const generateContent = async (
       - PROFESSIONAL EXPERIENCE: Keep 60% of the original core duties to maintain authenticity and truth.
       - TAILORING: ${tailorExperience ? "Rewrite the remaining 40% of bullet points to specifically align with JD keywords/metrics. Quantify achievements." : "Keep original points but optimize phrasing for impact."}
       
-      **FORMAT**:
-      1. **HEADER**: Name (H1), Contact Info (Email | Phone | Location | LinkedIn). **IMPORTANT**: If LinkedIn URL is present, write it out fully (e.g. linkedin.com/in/name).
+      **FORMAT & LAYOUT RULES**:
+      1. **HEADER**: Use strictly **Markdown**. 
+         - Line 1: # Name
+         - Line 2: Contact Info separated by pipes (|).
+           Format: Email | Phone | Location | LinkedIn
+           *Do NOT include labels like 'Email:', just the values.*
       2. **SUMMARY**: High-impact pitch tailored to JD.
       3. **SKILLS**: Grouped keywords matching JD.
       4. **EXPERIENCE**: Reverse chronological. Metric-heavy. Use the 60/40 rule.
       5. **EDUCATION**.
+      6. **LANGUAGES**: Include a section for spoken languages (e.g. English, Spanish) if applicable at the end.
       
-      Output ONLY Markdown.
+      Output ONLY Markdown. Do NOT use code blocks or raw HTML tags.
       `;
       break;
 
@@ -376,23 +494,25 @@ export const generateContent = async (
   const fullPrompt = `Job Description Context: ${jobDescription}\n\nTask: ${userPrompt}`;
 
   try {
-    const response = await withTimeout<GenerateContentResponse>(
-        ai.models.generateContent({
-            model: selectedModel,
-            contents: {
-                parts: [
-                { inlineData: { mimeType: resumeFile.type, data: resumeFile.base64 } },
-                { text: fullPrompt },
-                ],
-            },
-            config: {
-                temperature: 0.4,
-                tools: tools,
-                responseMimeType: useJson ? "application/json" : "text/plain"
-            }
-        }),
-        60000, 
-        "Generation Request Timed Out."
+    const response = await retryOperation(() =>
+        withTimeout<GenerateContentResponse>(
+            ai.models.generateContent({
+                model: selectedModel,
+                contents: {
+                    parts: [
+                    { inlineData: { mimeType: resumeFile.type, data: resumeFile.base64 } },
+                    { text: fullPrompt },
+                    ],
+                },
+                config: {
+                    temperature: 0.4,
+                    tools: tools,
+                    responseMimeType: useJson ? "application/json" : "text/plain"
+                }
+            }),
+            60000, 
+            "Generation Request Timed Out."
+        )
     );
 
     let text = response.text || "Failed to generate content.";
